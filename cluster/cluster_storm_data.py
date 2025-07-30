@@ -35,9 +35,9 @@ def main():
     # 1) Load hail points from PostGIS
     print(f"Loading hail points from {args.source_table}...")
     gdf = gpd.read_postgis(
-        f"SELECT *, geom FROM {args.source_table}",
+        f"SELECT * FROM {args.source_table}",
         engine,
-        geom_col='geom'
+        geom_col='geometry'
     )
 
     if gdf.empty:
@@ -59,7 +59,7 @@ def main():
             'dataset':      args.source_table,
             'cluster_id':   int(cid),
             'num_points':   len(sub),
-            'geom':         hull
+            'geometry':         hull
         })
 
     if not records:
