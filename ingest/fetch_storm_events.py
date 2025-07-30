@@ -1,86 +1,98 @@
+#!/usr/bin/env python3
 """
-Fetch storm events: first try NOAA Search API, fallback to bulk shapefile download if API fails.
+fetch_boundaries.py
+
+• Downloads the latest StormEvents_locations CSV for a given year.
+• Extracts point locations for each event.
+• Groups points by EPISODE_ID and EVENT_ID, computing the convex hull to approximate the event boundary.
 """
 import os
-import requests
+import re
 import tempfile
-import zipfile
-import geopandas as gpd
-from shapely.geometry import Point
-from datetime import datetime
+import shutil
+
 from urllib.parse import urljoin
 from urllib.request import urlretrieve
 
-NOAA_API_URL = "https://www.ncei.noaa.gov/access/services/search/v1/data"
-SHAPEFILE_BASE = (
-    "https://www1.ncdc.noaa.gov/pub/data/swdi/stormevents/shapefiles/{year}/"  # unzip structure
-)
-SHAPEFILE_NAME = "StormEvents_details-ftp_v1.0_d{year}_c20210412.zip"
+import requests
+import pandas as pd
+import geopandas as gpd
+from shapely.geometry import Point
+
+# Base URL for NOAA StormEvents locations CSVs
+CSV_BASE_URL = "https://www1.ncdc.noaa.gov/pub/data/swdi/stormevents/csvfiles/"
+FILENAME_PATTERN = r'href="(StormEvents_details-ftp_v1\.0_d{year}_c(\d{{8}})\.csv\.gz)"'
 
 
-def fetch_events_api(start_date: str, end_date: str, bbox: str = None) -> gpd.GeoDataFrame:
-    params = {
-        'dataset': 'storm_events',
-        'startDate': start_date,
-        'endDate': end_date,
-        'format': 'json'
-    }
-    if bbox:
-        params['bbox'] = bbox  # 'minLon,minLat,maxLon,maxLat'
-
-    resp = requests.get(NOAA_API_URL, params=params)
+def fetch_latest_csv_url(year: int) -> str:
+    """
+    Scrape the CSV directory and return the URL of the latest details CSV for the specified year.
+    """
+    url = CSV_BASE_URL
+    resp = requests.get(url)
     resp.raise_for_status()
-    features = resp.json().get('features', [])
-    return gpd.GeoDataFrame.from_features(features)
+    pattern = FILENAME_PATTERN.format(year=year)
+    matches = re.findall(pattern, resp.text)
+    if not matches:
+        raise RuntimeError(f"No locations CSV found for year {year}")
+    # matches: list of (filename, date_str)
+    latest = max(matches, key=lambda x: x[1])
+    filename = latest[0]
+    return urljoin(CSV_BASE_URL, filename)
 
 
-def fetch_events_shapefile(year: int) -> gpd.GeoDataFrame:
-    url = urljoin(
-        SHAPEFILE_BASE.format(year=year),
-        SHAPEFILE_NAME.format(year=year)
+def download_and_extract_csv(csv_url: str) -> str:
+    """
+    Download and decompress the .csv.gz file, return local CSV path.
+    """
+    workdir = tempfile.mkdtemp(prefix="storm_csv_")
+    gz_path = os.path.join(workdir, os.path.basename(csv_url))
+    print(f"Downloading {csv_url}")
+    urlretrieve(csv_url, gz_path)
+    csv_path = gz_path[:-3]
+    # Decompress
+    import gzip
+    with gzip.open(gz_path, 'rb') as f_in, open(csv_path, 'wb') as f_out:
+        shutil.copyfileobj(f_in, f_out)
+    return csv_path
+
+
+def build_boundaries(csv_path: str) -> gpd.GeoDataFrame:
+    """
+    Read the locations CSV, build convex hulls per event.
+    """
+    df = pd.read_csv(csv_path,
+                     usecols=["EPISODE_ID", "EVENT_ID", "BEGIN_LAT", "BEGIN_LON"]
+                     )
+    # Drop rows without valid coords
+    df = df.dropna(subset=["BEGIN_LAT", "BEGIN_LON"])
+    # Create GeoDataFrame of points
+    gdf_pts = gpd.GeoDataFrame(
+        df,
+        geometry=gpd.points_from_xy(df.BEGIN_LON, df.BEGIN_LAT),
+        crs="EPSG:4326"
     )
-    tmp = tempfile.mkdtemp(prefix="storm_shp_")
-    zip_path = os.path.join(tmp, os.path.basename(url))
-    print(f"Downloading shapefile {url}")
-    urlretrieve(url, zip_path)
-    with zipfile.ZipFile(zip_path, 'r') as z:
-        z.extractall(tmp)
-    # Find .shp file
-    shp_files = [f for f in os.listdir(tmp) if f.endswith('.shp')]
-    if not shp_files:
-        raise FileNotFoundError("No shapefile found in downloaded archive")
-    shp_path = os.path.join(tmp, shp_files[0])
-    gdf = gpd.read_file(shp_path)
-    return gdf
+    # Group and compute convex hull
+    gdf_hulls = (
+        gdf_pts
+        .dissolve(by=["EPISODE_ID", "EVENT_ID"], as_index=False)
+        .assign(geometry=lambda d: d.geometry.convex_hull)
+    )
+    return gdf_hulls
 
 
-def filter_date_range(gdf: gpd.GeoDataFrame, start_date: str, end_date: str) -> gpd.GeoDataFrame:
-    # Dataset columns BEGIN_DATE_TIME, END_DATE_TIME
-    fmt = "%Y-%m-%dT%H:%M:%S"
-    gdf['begin'] = gdf['BEGIN_DATE_TIME'].apply(lambda dt: datetime.strptime(dt[:19], fmt))
-    gdf['end'] = gdf['END_DATE_TIME'].apply(lambda dt: datetime.strptime(dt[:19], fmt))
-    start = datetime.fromisoformat(start_date)
-    end = datetime.fromisoformat(end_date)
-    return gdf[(gdf['begin'] >= start) & (gdf['end'] <= end)]
+def main():
+    import sys
+    if len(sys.argv) != 2:
+        print("Usage: python fetch_boundaries.py <YEAR>")
+        sys.exit(1)
+    year = int(sys.argv[1])
+    csv_url = fetch_latest_csv_url(year)
+    csv_path = download_and_extract_csv(csv_url)
+    gdf = build_boundaries(csv_path)
+    out = f"storm_boundaries_{year}.geojson"
+    gdf.to_file(out, driver="GeoJSON")
+    print(f"Saved {len(gdf)} boundaries to {out}")
 
-
-def fetch_events(start_date: str, end_date: str, bbox: str = None) -> gpd.GeoDataFrame:
-    try:
-        print("Trying NOAA Search API...")
-        gdf = fetch_events_api(start_date, end_date, bbox)
-        if gdf.empty:
-            print("API returned no events, falling back to shapefile")
-            raise ValueError("No data from API")
-        return gdf
-    except Exception as e:
-        print(f"API error: {e}")
-        year = int(start_date.split('-')[0])
-        gdf = fetch_events_shapefile(year)
-        return filter_date_range(gdf, start_date, end_date)
-
-
-if __name__ == '__main__':
-    # Example usage
-    gdf = fetch_events('2025-07-01', '2025-07-28', bbox=None)
-    print(gdf.shape)
-    gdf.to_file('storm_events.geojson', driver='GeoJSON')
+if __name__ == "__main__":
+    main()
