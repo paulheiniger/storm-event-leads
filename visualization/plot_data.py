@@ -40,7 +40,7 @@ def build_query(table, storm_id=None, event_type=None, start_date=None, end_date
             "ST_Intersects(geom, ST_MakeEnvelope(%f, %f, %f, %f, 4326))" % (minLon, minLat, maxLon, maxLat)
         )
     where_sql = ' AND '.join(where_clauses) if where_clauses else 'TRUE'
-    sql = f"SELECT *, geometry FROM {table} WHERE {where_sql};"
+    sql = f"SELECT * FROM {table} WHERE {where_sql};"
     return sql
 
 
@@ -48,7 +48,7 @@ def query_data(database_url, table, **filters):
     engine = create_engine(database_url)
     sql = build_query(table, **filters)
     print(f"Executing SQL: {sql}")
-    return gpd.read_postgis(sql, engine, geom_col='geom')
+    return gpd.read_postgis(sql, engine, geom_col="geometry", crs='EPSG:4326')
 
 
 def plot_map(gdf, output_html):
