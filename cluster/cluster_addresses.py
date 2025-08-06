@@ -5,10 +5,14 @@ cluster_addresses.py
 For each hail cluster boundary, find nearby addresses (within a buffer around the cluster centroid),
 perform DBSCAN clustering on those addresses, and save address-cluster hulls to PostGIS.
 
-Usage: python ingest/cluster_addresses.py --hail-cluster-table hail_cluster_boundaries_atlanta \
-                                         --address-table addresses \
-                                         --dest-table address_clusters_atlanta \
-                                         --buffer 0.02 --eps 0.001 --min-samples 10
+Usage:
+    python cluster/cluster_addresses.py \
+      --hail-cluster-table hail_cluster_boundaries \
+      --address-table      addresses \
+      --dest-table         address_clusters_jefferson \
+      --buffer             0.02 \
+      --eps                0.001 \
+      --min-samples        10
 
 Environment:
   DATABASE_URL environment variable must be set to your PostGIS connection string.
@@ -28,7 +32,7 @@ def main():
     parser.add_argument('--hail-cluster-table', required=True,
                         help='Table with hail cluster polygons (geom column)')
     parser.add_argument('--address-table', required=True,
-                        help='Table with address point geometries (geometry column)')
+                        help='Table with address point geometries (geom column)')
     parser.add_argument('--dest-table', required=True,
                         help='Destination table for address cluster hulls')
     parser.add_argument('--buffer', type=float, default=0.01,
@@ -45,14 +49,15 @@ def main():
 
     engine = create_engine(DATABASE_URL)
 
-    # 1) Load hail cluster centroids
+    # 1) Load hail cluster centroids (using geom column)
     sql_centroids = text(
-        f"SELECT cluster_id AS hail_cluster_id, ST_Centroid(geometry) AS geom "
+        f"SELECT cluster_id AS hail_cluster_id, ST_Centroid(geom) AS geom "
         f"FROM {args.hail_cluster_table};"
     )
     centroids = gpd.read_postgis(sql_centroids, engine, geom_col='geom')
     if centroids.empty:
-        print(f"No records in {args.hail_cluster_table}."); return
+        print(f"No records in {args.hail_cluster_table}.")
+        return
 
     records = []
     # 2) For each hail cluster centroid, buffer and fetch addresses
@@ -95,6 +100,7 @@ def main():
     print(f"Writing {len(addr_gdf)} address clusters to {args.dest_table}")
     addr_gdf.to_postgis(args.dest_table, engine, if_exists='replace', index=False)
     print("Address clustering complete.")
+
 
 if __name__ == '__main__':
     main()
